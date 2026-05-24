@@ -1,208 +1,4 @@
-/* ==========================================================================
-  톡톡 (TalkTalk) - Supabase 실시간 채팅
-  ========================================================================== */
-
-const SUPABASE_URL = 'https://yrndqghsdtxoajgxvqrv.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlybmRxZ2hzZHR4b2FqZ3h2cXJ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNjM3NTksImV4cCI6MjA5NDgzOTc1OX0.jEjISPblbaz-EFTE63kj8wG85lqWSdr_HAloukwzjnc';
-
-const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-/* ============================================================
-  전역 상태
-  ============================================================ */
-let currentTab = 'friends';
-let currentRoom = { id: null, isGroup: false, name: '' };
-let roomOpen = false;
-let searchQuery = "";
-let chatSearchQuery = "";
-let profileTargetId = null;
-let currentUserId = null;
-let currentUserProfile = null;
-let friendsList = [];
-let blockedList = []; // 차단 목록 (user_id 배열)
-let chatRoomsList = [];
-let messagesSubscription = null;
-let currentDegree = 0;
-let flipX = 1;
-let flipY = 1;
-let textEditMode = 'name';
-let selectedMessageId = null;
-let viewerContextMessageId = null;
-let isAppActive = true;  // 앱이 포그라운드에 있는지 여부
-
-/* ============================================================
-  폰트 / 테마 설정
-  ============================================================ */
-const FONT_LIST = [
-{ id: 'system',   name: '기본체',     css: "-apple-system,'Apple SD Gothic Neo','Noto Sans KR',sans-serif", preview: '가나다라 마바사아' },
-{ id: 'gothic',   name: '고딕체',     css: "'Malgun Gothic','맑은 고딕',sans-serif",                         preview: '가나다라 마바사아' },
-{ id: 'serif',    name: '바탕체',     css: "'Batang','바탕',Georgia,serif",                                   preview: '가나다라 마바사아' },
-{ id: 'nanum',    name: '나눔고딕',   css: "'Nanum Gothic',sans-serif",                                       preview: '가나다라 마바사아' },
-{ id: 'mono',     name: '모노체',     css: "'Courier New',Courier,monospace",                                 preview: '가나다라 마바사아' },
-];
-
-let currentFontId   = localStorage.getItem('tt_font_id')   || 'system';
-let currentFontSize = parseInt(localStorage.getItem('tt_font_size') || '15');
-let currentTheme    = localStorage.getItem('tt_theme')      || 'white';
-
-function applyFont() {
-const f = FONT_LIST.find(x => x.id === currentFontId) || FONT_LIST[0];
-document.documentElement.style.setProperty('--app-font', f.css);
-document.documentElement.style.setProperty('--app-font-size', currentFontSize + 'px');
-document.body.style.fontFamily = f.css;
-}
-function applyTheme() {
-if (currentTheme === 'dark') {
-document.documentElement.setAttribute('data-theme', 'dark');
-} else if (currentTheme === 'pokemon') {
-document.documentElement.setAttribute('data-theme', 'pokemon');
-} else if (currentTheme === 'hellokitty') {
-document.documentElement.setAttribute('data-theme', 'hellokitty');
-} else {
-document.documentElement.removeAttribute('data-theme'); // white는 기본
-}
-}
-applyFont();
-applyTheme();
-
-/* ============================================================
-  도우미
-  ============================================================ */
-function timeNow() {
-const d = new Date();
-const h = d.getHours();
-const m = String(d.getMinutes()).padStart(2, '0');
-return `${h >= 12 ? '오후' : '오전'} ${h % 12 || 12}:${m}`;
-}
-function dateStr() {
-const d = new Date();
-return `${d.getFullYear()}년 ${d.getMonth()+1}월 ${d.getDate()}일`;
-}
-function showToast(title, message, color='#333') {
-const tc = document.getElementById('toast-container');
-if (!tc) return;
-const t = document.createElement('div');
-t.className = 'toast';
-t.innerHTML = `<div class="toast-avatar avatar-base"><i class="ti ti-info-circle"></i></div>
-                <div class="toast-body"><div class="toast-name">${title}</div><div class="toast-msg">${message}</div></div>`;
-tc.appendChild(t);
-setTimeout(() => { t.classList.add('hiding'); setTimeout(() => t.remove(), 200); }, 2500);
-}
-function showChatNotification(name, text, avatarUrl, roomId) {
-  const tc = document.getElementById('toast-container');
-  if (!tc) return;
-
-  // 기존 채팅 토스트가 있으면 즉시 제거 (최신 1개만 유지)
-  const existing = tc.querySelector('.toast-chat');
-  if (existing) existing.remove();
-
-  const t = document.createElement('div');
-  t.className = 'toast toast-chat';
-  const avStyle = avatarUrl ? `style="background-image:url('${avatarUrl}'); background-size:cover; background-position:center;"` : '';
-  t.innerHTML = `<div class="toast-avatar avatar-base" ${avStyle}>${avatarUrl?'':'<i class="ti ti-user"></i>'}</div>
-                 <div class="toast-body"><div class="toast-name">${name}</div><div class="toast-msg">${text}</div></div>`;
-  t.onclick = () => {
-    if (roomId) openRoomFromData(roomId);
-    t.remove();
-  };
-  tc.appendChild(t);
-  setTimeout(() => { if (t.parentNode) { t.classList.add('hiding'); setTimeout(() => t.remove(), 200); } }, 3500);
-}
-
-function applyAvatarStyle(element, imgUrl) {
-if (!element) return;
-if (imgUrl) {
-element.style.backgroundImage = `url('${imgUrl}')`;
-element.style.backgroundSize = 'cover';
-element.style.backgroundPosition = 'center';
-element.innerHTML = '';
-} else {
-element.style.backgroundImage = 'none';
-element.innerHTML = '<i class="ti ti-user"></i>';
-}
-}
-
-/* ============================================================
-  인증 & 초기화
-  ============================================================ */
-window.addEventListener('DOMContentLoaded', async () => { await initApp(); });
-
-async function initApp() {
-  const authScreen = document.getElementById('auth-screen');
-  const splashLogo = document.getElementById('splash-logo');
-  const savedSession = localStorage.getItem('talktalk_session');
-
-  // ✅ 앱 활성화 상태 감지 및 DB 업데이트
-  const updateAppActiveStatus = async () => {
-    isAppActive = !document.hidden;
-    if (currentUserId) {
-      await supabaseClient
-        .from('profiles')
-        .update({ is_app_active: isAppActive })
-        .eq('id', currentUserId);
-    }
-    console.log('앱 활성화 상태:', isAppActive ? '활성화' : '비활성화');
-  };
-
-  document.addEventListener('visibilitychange', updateAppActiveStatus);
-  await updateAppActiveStatus(); // 초기 상태 저장
-
-  if (savedSession) {
-    try {
-      const { data: { session }, error } = await supabaseClient.auth.getSession();
-      if (!error && session?.user) {
-        // ✅ DB에서 로그인 상태 확인
-        const { data: profile, error: profileError } = await supabaseClient
-          .from('profiles')
-          .select('is_logged_in')
-          .eq('id', session.user.id)
-          .single();
-
-        // ✅ 이미 다른 기기에서 로그인되어 있으면 세션 무효화
-        if (!profileError && profile && !profile.is_logged_in) {
-          console.log('다른 기기에서 로그인되어 세션이 무효화됨');
-          localStorage.removeItem('talktalk_session');
-          await supabaseClient.auth.signOut();
-          showToast("알림", "다른 기기에서 로그인되어 로그아웃되었습니다.", "#ff4757");
-          if (authScreen) authScreen.style.display = 'flex';
-          return;
-        }
-
-        currentUserId = session.user.id;
-        if (authScreen) authScreen.style.display = 'none';
-        await loadUserData(session.user.id);
-        
-        // ✅ 로그인 후 앱 상태 DB 업데이트
-        await updateAppActiveStatus();
-        
-        showToast("환영합니다", `${currentUserProfile?.name || '사용자'}님, 자동 로그인되었습니다.`, "#fee500");
-        return;
-      }
-    } catch(e) {
-      console.log('세션 복원 오류:', e);
-    }
-  }
-
-  // 로그인 안 된 경우에만 스플래시 표시
-  if (authScreen) {
-    authScreen.style.display = 'flex';
-    if (splashLogo) splashLogo.style.display = 'flex';
-  }
-  setTimeout(() => {
-    if (splashLogo) splashLogo.style.display = 'none';
-    toggleAuthForm('login');
-  }, 1500);
-}
-async function loadUserData(userId) {
-const { data: profile } = await supabaseClient.from('profiles').select('*').eq('id', userId).single();
-if (profile) { currentUserProfile = profile; syncMyProfileDOM(); }
-
-await Promise.all([loadBlockedList(), loadFriends(), loadChatRooms(), loadFriendRequests()]);
-
-renderFriends();
-renderChats();
-checkUnreadDots();
-startGlobalRealtime();
+ㅊbalRealtime();
 if (currentUserProfile?.is_admin) {
 const btn = document.getElementById('admin-panel-btn');
 if (btn) btn.style.display = 'flex';
@@ -384,126 +180,142 @@ async function handleLogin() {
     last_login_at: new Date().toISOString()
   }).eq('id', data.user.id);
 
-  await loadUserData(data.user.id);
-  document.getElementById('auth-screen').style.display = 'none';
-  showToast("로그인 성공", profile.name + "님 반갑습니다!", "#fee500");
-  ['login-id','login-pw'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
-}
-async function handleLogout() {
-// ✅ 로그아웃 시 로그인 상태 false로 변경
-if (currentUserId) {
-await supabaseClient.from('profiles').update({ is_logged_in: false }).eq('id', currentUserId);
+  await loadUserDr_id', currentUserId)
+.eq('status', 'pending');
+friendRequests = requests || [];
 }
 
-await supabaseClient.auth.signOut();
-localStorage.removeItem('talktalk_session');
-currentUserId = null; currentUserProfile = null;
-const authScreen = document.getElementById('auth-screen');
-if (authScreen) {
-authScreen.style.display = 'flex';
-const splash = document.getElementById('splash-logo');
-if (splash) splash.style.display = 'flex';
-}
-toggleAuthForm('login');
-switchTab('friends');
-showToast("로그아웃", "안전하게 로그아웃되었습니다.", "#ff4757");
+function renderFriendRequests() {
+const container = document.getElementById('friend-requests-container');
+const list = document.getElementById('friend-requests-list');
+if (!container || !list) return;
+
+if (friendRequests.length === 0) {
+container.style.display = 'none';
+return;
 }
 
-/* ============================================================
-  친구 렌더링
-  ============================================================ */
-function renderFriends() {
-renderFriendRequests(); 
-const container = document.getElementById('friends-list-container');
-if (!container) return;
-const filtered = friendsList.filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase()));
-const favoriteFriends = filtered.filter(f => f.isFavorite);
-const normalFriends   = filtered.filter(f => !f.isFavorite);
-
-let html = "";
-if (favoriteFriends.length > 0) {
-html += `<div class="favorite-section"><div class="section-title">즐겨찾기 ${favoriteFriends.length}</div>`;
-html += favoriteFriends.map(f => makeFriendItemHTML(f)).join('');
-html += `</div>`;
-}
-html += `<div class="normal-section"><div class="section-title">친구 ${normalFriends.length}</div>`;
-if (normalFriends.length === 0 && favoriteFriends.length === 0)
-html += `<div class="empty-state"><p>등록된 친구가 없습니다.</p></div>`;
-else html += normalFriends.map(f => makeFriendItemHTML(f)).join('');
-html += `</div>`;
-
-const recs = renderRecommendSection();
-if (recs) html += recs;
-container.innerHTML = html;
-}
-
-function renderRecommendSection() {
-// ✅ friendRequests에서 아직 응답하지 않은 요청만 가져오기
-const pendingRequests = friendRequests.filter(req => req.status === 'pending');
-
-if (pendingRequests.length === 0) return '';
-
-let html = `<div class="normal-section"><div class="section-title" style="color:#888;">📨 받은 친구 요청 ${pendingRequests.length}</div>`;
-html += pendingRequests.map(req => {
-const fromUser = req.from;
-if (!fromUser) return '';
-
-return `
-     <div class="friend-item" style="opacity:0.75;">
-       <div class="avatar-sm avatar-base">${fromUser.avatar ? `<div style="width:100%;height:100%;background:url('${fromUser.avatar}') center/cover;border-radius:50%;"></div>` : '<i class="ti ti-user"></i>'}</div>
-       <div style="flex:1;">
-         <div class="fi-name">${fromUser.name}</div>
-         <div class="fi-status">${fromUser.status || ''}</div>
-       </div>
-       <div style="display: flex; gap: 6px;">
-         <button onclick="respondToFriendRequest('${req.id}', 'accept')" style="background:#2ed573; border:none; border-radius:8px; padding:5px 10px; font-size:12px; font-weight:700; color:white; cursor:pointer;">✅ 수락</button>
-         <button onclick="respondToFriendRequest('${req.id}', 'reject')" style="background:#ff4757; border:none; border-radius:8px; padding:5px 10px; font-size:12px; font-weight:700; color:white; cursor:pointer;">❌ 거절</button>
-       </div>
+container.style.display = 'block';
+list.innerHTML = friendRequests.map(req => `
+   <div class="friend-item">
+     <div class="avatar-sm avatar-base">${req.from?.avatar ? `<div style="width:100%;height:100%;background:url('${req.from.avatar}') center/cover;border-radius:50%;"></div>` : '<i class="ti ti-user"></i>'}</div>
+     <div style="flex:1;">
+       <div class="fi-name">${req.from?.name || '알 수 없음'}</div>
+       <div class="fi-status">@${req.from?.username || ''}</div>
      </div>
-   `;
-}).join('');
-html += `</div>`;
-return html;
-}
-async function quickAddFriend(friendId, friendUsername, friendName) {
-if (friendsList.some(f => f.id === friendId)) { showToast("알림","이미 친구입니다.","#888"); return; }
-await supabaseClient.from('friendships').insert({ user_id: currentUserId, friend_id: friendId, status: 'accepted' });
-const { data: room } = await supabaseClient.from('chat_rooms').insert({
-name: friendName, is_group: false, created_by: currentUserId
-}).select().single();
-if (room) {
-await supabaseClient.from('chat_room_members').insert([
-{ room_id: room.id, user_id: currentUserId },
-{ room_id: room.id, user_id: friendId }
-]);
-chatRoomsList.push(room);
-}
-const { data: fullProfile } = await supabaseClient.from('profiles').select('*').eq('id', friendId).single();
-friendsList.push({ id: friendId, username: friendUsername, name: friendName, status: fullProfile?.status||'', avatar: fullProfile?.avatar||null, isFavorite: false });
-renderFriends(); renderChats();
-showToast("친구 추가", `${friendName}님과 친구가 되었습니다!`, "#2ed573");
-}
-
-function makeFriendItemHTML(f) {
-const isBlocked = blockedList.includes(f.id);
-const avatarStyle = f.avatar ? `style="background-image:url('${f.avatar}'); background-size:cover; background-position:center;"` : '';
-const avatarIcon = f.avatar ? '' : '<i class="ti ti-user"></i>';
-const starBadge = f.isFavorite ? `<i class="ti ti-star-filled fi-star-badge"></i>` : '';
-const blockedBadge = isBlocked ? `<span style="font-size:10px;color:#ff4757;margin-left:4px;">차단됨</span>` : '';
-return `<div class="friend-item" onclick="openProfileCard('${f.id}')">
-   <div class="avatar-sm avatar-base" ${avatarStyle}>${avatarIcon}</div>
-   <div style="flex:1;min-width:0;">
-     <div class="fi-name" style="display:flex;align-items:center;gap:4px;">${f.name}${blockedBadge}</div>
-     <div class="fi-status">${isBlocked ? '차단된 친구' : (f.status||'')}</div>
+     <div style="display: flex; gap: 6px;">
+       <button onclick="respondToFriendRequest('${req.id}', 'accept')" style="background:#2ed573; border:none; border-radius:6px; padding:5px 10px; cursor:pointer;">✅ 수락</button>
+       <button onclick="respondToFriendRequest('${req.id}', 'reject')" style="background:#ff4757; border:none; border-radius:6px; padding:5px 10px; color:white; cursor:pointer;">❌ 거절</button>
+     </div>
    </div>
-   ${starBadge}
- </div>`;
+ `).join('');
 }
 
-/* ============================================================
-  차단 기능
-  ============================================================ */
-async function blockFriend(friendId) {
+async function respondToFriendRequest(requestId, action) {
+const { data: req } = await supabaseClient
+.from('friend_requests')
+.select('from_user_id')
+.eq('id', requestId)
+.single();
+
+if (!req) return;
+
+if (action === 'accept') {
+// 요청 상태 업데이트
+await supabaseClient.from('friend_requests').update({ status: 'accepted' }).eq('id', requestId);
+
+// 친구 관계 추가 (양방향)
+await supabaseClient.from('friendships').insert([
+{ user_id: currentUserId, friend_id: req.from_user_id, status: 'accepted' },
+{ user_id: req.from_user_id, friend_id: currentUserId, status: 'accepted' }
+]);
+
+await loadFriends();
+renderFriends();
+renderChats();
+showToast("친구 수락", "친구가 되었습니다!", "#2ed573");
+} else {
+await supabaseClient.from('friend_requests').update({ status: 'rejected' }).eq('id', requestId);
+showToast("친구 거절", "친구 요청을 거절했습니다.", "#ff4757");
+}
+
+await loadFriendRequests();
+renderFriendRequests();
+}
+// 채팅방 열리면 모든 메시지를 읽음 처리
+async function markMessagesAsRead(roomId) {
+const { data: messages } = await supabaseClient
+.from('messages')
+.select('id, read_by')
+.eq('room_id', roomId)
+.neq('sender_id', currentUserId);  // 내가 보낸 메시지는 제외
+
+for (const msg of messages || []) {
+const readBy = msg.read_by || [];
+if (!readBy.includes(currentUserId)) {
+await supabaseClient
+.from('messages')
+.update({ read_by: [...readBy, currentUserId] })
+.eq('id', msg.id);
+}
+}
+
+renderChats(); // 목록 새로고침
+}
+
+// 전역 변수
+let isSignupLocked = false;
+
+// 가입 제한 상태 불러오기
+async function loadSignupLockStatus() {
+  const { data, error } = await supabaseClient
+    .from('profiles')
+    .select('is_signup_enabled')
+    .eq('id', currentUserId)
+    .single();
+  
+  if (!error && data) {
+    isSignupLocked = !data.is_signup_enabled;
+    updateSignupLockUI();
+  }
+}
+
+// UI 업데이트
+function updateSignupLockUI() {
+  const btn = document.getElementById('toggle-signup-lock-btn');
+  const status = document.getElementById('signup-lock-status');
+  
+  if (btn) {
+    btn.textContent = isSignupLocked ? '🔓 제한 해제하기' : '🔒 제한 걸기';
+    btn.style.background = isSignupLocked ? '#2ed573' : '#ff4757';
+  }
+  if (status) {
+    status.textContent = isSignupLocked 
+      ? '⛔ 현재 신규 계정 가입이 차단되어 있습니다.' 
+      : '✅ 신규 계정 가입이 가능합니다.';
+  }
+}
+
+// 가입 제한 토글
+async function toggleSignupLock() {
+  const newLockStatus = !isSignupLocked;
+  
+  // is_signup_enabled = true 면 가입 가능, false 면 가입 불가
+  const { error } = await supabaseClient
+    .from('profiles')
+    .update({ is_signup_enabled: !newLockStatus })
+    .eq('id', currentUserId);
+  
+  if (error) {
+    showToast("오류", "설정 변경에 실패했습니다.", "#ff4757");
+    return;
+  }
+  
+  isSignupLocked = newLockStatus;
+  updateSignupLockUI();
+  showToast("설정 변경", isSignupLocked ? "신규 가입이 차단되었습니다." : "신규 가입이 허용되었습니다.", "#2ed573");
+}
+ockFriend(friendId) {
 if (blockedList.includes(friendId)) {
 showToast("알림","이미 차단된 사용자입니다.","#888");
 return;
